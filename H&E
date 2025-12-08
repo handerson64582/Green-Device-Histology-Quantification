@@ -1,0 +1,61 @@
+// Attribution: Initial draft assisted by Code Copilot (ChatGPT, OpenAI; GPT-5 Thinking), 2025-12-05.
+
+macro "Four Measurements (Results Only)" {
+    // Open image
+    open(File.openDialog("Select image"));
+    base = getTitle();
+
+    // --- Helpers ---
+    function ensureStraightLine(prompt) {
+        while (true) {
+            waitForUser(prompt);
+            if (selectionType()!=5) { showMessage("Use the Straight Line tool."); continue; }
+            getLine(ax,ay,bx,by,lw);
+            if (ax==bx && ay==by) { showMessage("Line has zero length. Redraw."); continue; }
+            return;
+        }
+    }
+    function lineLengthPx() {
+        getLine(x1,y1,x2,y2,lw);
+        dx = x2-x1; dy = y2-y1;
+        return sqrt(dx*dx + dy*dy);
+    }
+
+    // --- Four arbitrary measurements (pixels) ---
+    len1_px = 0; len2_px = 0; len3_px = 0; len4_px = 0;
+
+    ensureStraightLine("Draw measurement 1 with the Straight Line tool, then click OK.");
+    len1_px = lineLengthPx();
+
+    ensureStraightLine("Draw measurement 2, then click OK.");
+    len2_px = lineLengthPx();
+
+    ensureStraightLine("Draw measurement 3, then click OK.");
+    len3_px = lineLengthPx();
+
+    ensureStraightLine("Draw measurement 4, then click OK.");
+    len4_px = lineLengthPx();
+
+    // --- Scale bar measurement (pixels) ---
+    ensureStraightLine("Draw a straight line exactly over the SCALE BAR, then click OK.");
+    scale_px = lineLengthPx();
+    if (scale_px<=0) exit("Scale bar line length must be > 0.");
+
+    // --- Scale bar length (µm) ---
+    scale_um = getNumber("Enter the scale bar length (µm):", 100.0);
+    if (scale_um<=0) exit("Scale bar length (µm) must be > 0.");
+
+    // --- Conversion and Results (ImageJ Results window only) ---
+    um_per_px = scale_um / scale_px;
+
+    run("Clear Results");
+    setResult("Length_px", 0, len1_px); setResult("Length_um", 0, len1_px*um_per_px);
+    setResult("Length_px", 1, len2_px); setResult("Length_um", 1, len2_px*um_per_px);
+    setResult("Length_px", 2, len3_px); setResult("Length_um", 2, len3_px*um_per_px);
+    setResult("Length_px", 3, len4_px); setResult("Length_um", 3, len4_px*um_per_px);
+    setResult("Length_px", 4, scale_px); setResult("Length_um", 4, scale_um);
+    updateResults(); run("Results...");
+
+    showMessage("Done",
+        "Rows: 1–4 = your four measurements, 5 = Scale bar\nµm/pixel = "+d2s(um_per_px,6));
+}

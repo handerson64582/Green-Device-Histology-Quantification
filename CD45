@@ -1,0 +1,168 @@
+// Attribution: Initial draft assisted by Code Copilot (ChatGPT, OpenAI; GPT-5 Thinking), 2025-12-05
+// File: ijm/dapi_red_merge_roi_red5steps_nored_full.ijm
+// Fully self-contained. No 'closeOnly' helper required. Leaves no red overlay behind.
+
+macro "DAPI→RED→Merge→ROI→RED 5-steps Count (no red overlay)" {
+
+    // ===== 1) DAPI (bake B&C) =====
+    open(File.openDialog("Select DAPI image"));
+    waitForUser("Activate the DAPI window, then press OK.");
+    assertActiveOrExit("No DAPI active");
+    rename("DAPI_Main");
+    if (bitDepth()!=8) run("8-bit");
+    run("Brightness/Contrast...");
+    waitForUser("In 'Brightness & Contrast': click Auto and increase contrast as desired, then press OK here.");
+    selectWindow("DAPI_Main");
+    run("Apply LUT");
+
+    // ===== 2) RED (kept) =====
+    open(File.openDialog("Select RED image"));
+    waitForUser("Activate the RED window, then press OK.");
+    assertActiveOrExit("No RED active");
+    rename("RED_Main");
+    if (bitDepth()!=8) run("8-bit");
+
+    // ===== 3) Merge for context (originals preserved) =====
+    // Duplicate both channels for merging so originals remain untouched
+    selectWindow("RED_Main");  run("Duplicate...", "title=[__RED_MRG__]");
+    selectWindow("DAPI_Main"); run("Duplicate...", "title=[__DAPI_MRG__]");
+    // Dummy green and merge
+    selectWindow("__RED_MRG__"); w=getWidth(); h=getHeight();
+    newImage("__DUMMY_G__", "8-bit black", w, h, 1);
+    run("Merge Channels...", "red=[__RED_MRG__] green=__DUMMY_G__ blue=[__DAPI_MRG__] create");
+    rename("Merged_RB [COMPOSITE]");
+    selectWindow("Merged_RB [COMPOSITE]"); run("Hyperstack to Stack"); run("Stack to RGB");
+    rename("Merged_RB [RGB]");
+    // Close temps explicitly (no 'closeOnly')
+    safeCloseIfOpen("__RED_MRG__");
+    safeCloseIfOpen("__DAPI_MRG__");
+    safeCloseIfOpen("__DUMMY_G__");
+    safeCloseIfOpen("Merged_RB [COMPOSITE]");
+
+    // ===== 4) ROI on merged; mirror to RED =====
+    selectWindow("Merged_RB [RGB]");
+    setTool("oval");
+    waitForUser("Draw ROI on 'Merged_RB [RGB]' (hold SHIFT for circle), then press OK.");
+    if (selectionType() == -1) exit("No ROI selected.");
+    roiManager("reset"); roiManager("Add"); roiManager("select", 0);
+    overlayOn("Merged_RB [RGB]");
+    overlayOn("RED_Main");
+
+    // ===== 5) Build RED interior/exterior =====
+    setOption("BlackBackground", true);
+    redInt = makeMaskedCopy("RED_Main", " (interior)", false, "yellow", 2, true, false);
+    redExt = makeMaskedCopy("RED_Main", " (exterior)", true,  "yellow", 2, true, false);
+
+    // ===== 6) EXACT 5 steps on interior/exterior; no red left, 2 rows in Results =====
+    if (isOpen("Results")) run("Clear Results");
+
+    intInfo = runFiveStepsNoRed(redInt, false);  // "title\tw\th\tnPixels\tcount"
+    extInfo = runFiveStepsNoRed(redExt, true);
+
+    writeRowFromInfo(0, intInfo);
+    writeRowFromInfo(1, extInfo);
+    updateResults();
+
+    // Bring useful windows forward
+    bringIfOpen("Merged_RB [RGB]");
+    bringIfOpen(redExt); bringIfOpen(redInt);
+    bringIfOpen("RED_Main"); bringIfOpen("DAPI_Main");
+}
+
+/* ---------------- Core 5-Step Runner (no red overlay) ---------------- */
+// Returns "title\tw\th\tnPixels\tcount"
+function runFiveStepsNoRed(viewTitle, isExterior) {
+    selectWindow(viewTitle);
+
+    // (1) remove yellow overlays
+    run("Remove Overlay");
+
+    // (2) convert to 8-bit
+    if (bitDepth()!=8) run("8-bit");
+
+    // geometry
+    w = getWidth(); h = getHeight();
+
+    // ROI region; inverse for exterior
+    roiManager("select", 0);
+    if (isExterior) run("Make Inverse");
+
+    // measure region pixels BEFORE AP
+    getRawStatistics(npx, mean, minv, maxv, std, hist);
+    regionPx = npx;
+
+    // (3) set threshold 30–255 (we will not leave it)
+    setThreshold(30, 255);
+
+    // (4) avoid red overlay: Make Binary → AP (headless) → clear AP rows
+    run("Make Binary");
+    run("Set Measurements...", "redirect=None decimal=0");
+    run("Analyze Particles...", "size=1-Infinity circularity=0.00-1.00 show=Nothing clear");
+    count = nResults;
+    run("Clear Results");
+
+    // (5) cleanup to restore your view
+    run("Undo");        // revert Make Binary
+    setThreshold(0, 0); // clear threshold state
+    run("Select None");
+
+    return viewTitle + "\t" + w + "\t" + h + "\t" + regionPx + "\t" + count;
+}
+
+/* ---------------- Utilities ---------------- */
+
+function writeRowFromInfo(row, infoTSV) {
+    parts = split(infoTSV, "\t");
+    title    = parts[0];
+    w        = parseInt(parts[1]);
+    h        = parseInt(parts[2]);
+    regionPx = parseFloat(parts[3]);
+    count    = parseInt(parts[4]);
+
+    setResult("Window", row, title);
+    setResult("Width",  row, w);
+    setResult("Height", row, h);
+    setResult("RegionPixels", row, regionPx);
+    setResult("Red_Particle_Count", row, count);
+}
+
+function assertActiveOrExit(msg){
+    titles = getList("image.titles");
+    if (titles.length == 0) exit(msg);
+    t = getTitle(); // ensures an active image
+}
+
+function safeCloseIfOpen(n){ if (n!="" && isOpen(n)) { selectWindow(n); close(); } }
+
+function overlayOn(win){
+    if (!isOpen(win)) return;
+    selectWindow(win);
+    run("Overlay Options...", "stroke=yellow width=2 draw");
+    roiManager("select", 0); run("Add Selection..."); run("Show Overlay"); run("Select None");
+}
+
+function bringIfOpen(n){ if (n!="" && isOpen(n)) selectWindow(n); }
+
+// Duplicate with ROI mask; exterior keeps outside (inside cleared).
+function makeMaskedCopy(srcName, suffix, exterior, strokeColor, lineW, showOverlay, burnOutline) {
+    if (!isOpen(srcName)) return "";
+    selectWindow(srcName);
+    out = srcName + suffix;
+    run("Duplicate...", "title=["+out+"]");
+    selectWindow(out);
+
+    roiManager("select", 0);
+    if (exterior) run("Make Inverse");
+    run("Clear Outside");   // keep only the desired side of ROI
+    run("Select None");
+
+    if (showOverlay) {
+        run("Overlay Options...", "stroke="+strokeColor+" width="+lineW+" draw");
+        roiManager("select", 0); run("Add Selection..."); run("Show Overlay"); run("Select None");
+    }
+    if (burnOutline) {
+        roiManager("select", 0);
+        setColor(255,255,0); setLineWidth(lineW); run("Draw"); run("Select None");
+    }
+    return out;
+}

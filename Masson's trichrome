@@ -1,0 +1,248 @@
+// Attribution: Initial draft assisted by Code Copilot (ChatGPT, OpenAI; GPT-5 Thinking), 2025-12-05.
+// File: ijm/rgb_blue_BLACK_foreground_full_pipeline_SAVE_fixed.ijm
+// Counts tissue (BLACK) for RGB & Masson-Blue, interior/exterior ROI.
+// Saves all 8 output windows to the SAME folder as the input image.
+
+/* -------------------- Utilities (put first) -------------------- */
+function push(a,v){return Array.concat(a,newArray(v));}
+function arrayContains(a,v){for(i=0;i<a.length;i++) if(a[i]==v) return true; return false;}
+function startsWith(s,p){return indexOf(s,p)==0?1:0;}
+function listDiff(post,pre){o=newArray();for(i=0;i<post.length;i++) if(!arrayContains(pre,post[i])) o=push(o,post[i]); return o;}
+function bringIfOpen(n){if(n!=""&&isOpen(n))selectWindow(n);}
+function closeIfOpen(n){if(n!=""&&isOpen(n)){selectWindow(n); close();}}
+
+/* sanitize a window title into a filesystem-safe filename */
+function sanitize(name){
+    s = name;
+    s = replace(s, "/", "-");
+    s = replace(s, "\\", "-");
+    s = replace(s, ":", "-");
+    s = replace(s, "\"", "");
+    s = replace(s, "<", "(");
+    s = replace(s, ">", ")");
+    s = replace(s, "|", "-");
+    s = replace(s, "?", "");
+    s = replace(s, "*", "");
+    return s;
+}
+
+/* ROI-clipped full-size duplicate; exterior keeps outside (inside cleared) */
+function makeMaskedCopy(src,suffix,exterior,strokeColor,lineW,showOverlay,burnOutline){
+    if(!isOpen(src)) return "";
+    selectWindow(src);
+    out = src + suffix;
+    run("Select None");
+    run("Duplicate...", "title=["+out+"]");
+    selectWindow(out);
+    roiManager("select", 0);
+    if (exterior) run("Make Inverse");
+    run("Clear Outside");
+    run("Select None");
+    if (showOverlay) {
+        run("Overlay Options...", "stroke="+strokeColor+" width="+lineW+" draw");
+        roiManager("select", 0); run("Add Selection..."); run("Show Overlay"); run("Select None");
+    }
+    if (burnOutline) { setLineWidth(lineW); run("Draw"); run("Select None"); }
+    return out;
+}
+
+/* Masson Colour Deconvolution → keep C1 / (Colour_1) (blue) */
+function massonBlueFromDeconv(dBase){
+    pre = getList("image.titles");
+    vecs = newArray("[Masson Trichrome]","[Masson Trichrome 2]","[Masson Trichrome (Lillie)]","[Masson]");
+    blue = "";
+    for (k=0; k<vecs.length && blue==""; k++){
+        selectWindow(dBase);
+        run("Colour Deconvolution","vectors="+vecs[k]);
+        post = getList("image.titles");
+        added = listDiff(post, pre);
+        for(i=0;i<added.length;i++){
+            t = added[i];
+            if (indexOf(t,"Colour Deconvolution")!=-1) continue;
+            isBlue = 0;
+            if (startsWith(t,"C1-")==1) isBlue=1;
+            if (indexOf(t,"(Colour_1)")!=-1) isBlue=1;
+            if (isBlue==1) { blue=t; break; }
+        }
+        // close everything except chosen C1 image
+        for(i=0;i<added.length;i++){
+            tt = added[i];
+            if (indexOf(tt,"Colour Deconvolution")!=-1) { closeIfOpen(tt); continue; }
+            if (blue=="" || tt!=blue) closeIfOpen(tt);
+        }
+    }
+    if (blue!=""){
+        selectWindow(blue);
+        if (bitDepth()!=8) run("8-bit");
+        rename(dBase+" (blue from Masson C1)");
+        return getTitle();
+    }
+    return "";
+}
+
+/* ---------- BIN builders: tissue=BLACK (outside of ROI forced WHITE) ---------- */
+
+/* RGB: thr 0–150 → bin → INVERT → ROI/inverse → Clear Outside (WHITE) */
+function makeRGBMask_BLACK(viewTitle,isExterior){
+    selectWindow(viewTitle);
+    run("Duplicate...", "title=[__TMP_RGB__]");
+    selectWindow("__TMP_RGB__");
+    run("RGB Color"); run("8-bit");
+    setThreshold(0,200);          // select darker (tissue)
+    run("Convert to Mask");       // selected -> WHITE
+    run("Invert");                // tissue -> BLACK
+    setBackgroundColor(255,255,255);
+    roiManager("select", 0);
+    if (isExterior) run("Make Inverse");
+    run("Clear Outside");         // outside region -> WHITE
+    run("Select None");
+    title = viewTitle + " [RGB BIN]";
+    rename(title);
+    return title;
+}
+
+/* Blue (Masson C1): thr 0–60 → bin → INVERT → ROI/inverse → Clear Outside (WHITE) */
+function makeBlueMask_BLACK(viewTitle,isExterior,lowMax){
+    if (lowMax<=0) lowMax=100;
+    selectWindow(viewTitle);
+    run("Duplicate...", "title=[__TMP_BLUE__]");
+    selectWindow("__TMP_BLUE__");
+    if (bitDepth()!=8) run("8-bit");
+    setThreshold(0,lowMax);
+    run("Convert to Mask");       // low range -> WHITE
+    run("Invert");                // stain/tissue -> BLACK
+    setBackgroundColor(255,255,255);
+    roiManager("select", 0);
+    if (isExterior) run("Make Inverse");
+    run("Clear Outside");
+    run("Select None");
+    title = viewTitle + " [Blue BIN]";
+    rename(title);
+    return title;
+}
+
+/* -------------------- MAIN -------------------- */
+macro "RGB & Masson-Blue (BLACK=tissue) → interior/exterior → BIN & Results → SAVE" {
+    // 0) Ensure there is an input image and remember its folder
+    if (nImages()==0) {
+        // No images open → ask user to open one
+        open();
+        if (nImages()==0) exit("No image opened – aborting.");
+    }
+
+    base = getTitle();      // active image
+    selectWindow(base);
+    run("RGB Color");
+
+    // 1) Duplicate for deconvolution
+    selectWindow(base);
+    run("Duplicate...", "title=["+base+" [DECONV]]");
+    deconvBase = base + " [DECONV]";
+
+    // 2) ROI
+    selectWindow(base);
+    setTool("oval");
+    waitForUser("Draw a circular ROI on \""+base+"\" (hold SHIFT), then press OK.");
+    if (selectionType() == -1) exit("No ROI selected.");
+    roiManager("reset"); roiManager("Add"); roiManager("select", 0);
+
+    // 3) Display options (overlay only)
+    Dialog.create("ROI / Display Options");
+    Dialog.addCheckbox("Show ROI overlay", true);
+    Dialog.addChoice("Overlay color", newArray("yellow","red","green","blue","white","black","cyan","magenta"), "yellow");
+    Dialog.addNumber("Line width (px)", 2);
+    Dialog.addCheckbox("Burn outline into pixels", false);
+    Dialog.addCheckbox("Outside is black (else white)", true);
+    Dialog.show();
+    showOverlay  = Dialog.getCheckbox();
+    strokeColor  = Dialog.getChoice();
+    lineW        = Dialog.getNumber();
+    burnOutline  = Dialog.getCheckbox();
+    blackOutside = Dialog.getCheckbox();
+
+    // 4) Masson Deconvolution -> Blue C1
+    selectWindow(deconvBase);
+    bBase = massonBlueFromDeconv(deconvBase);
+    if (bBase=="") exit("Masson deconvolution failed: C1/Colour_1 not found.");
+
+    // 5) Build full-size views (no resize/crop)
+    setOption("BlackBackground", blackOutside);
+    rgbInt = makeMaskedCopy(base, " [RGB] (interior)", false, strokeColor, lineW, showOverlay, burnOutline);
+    rgbExt = makeMaskedCopy(base, " [RGB] (exterior)", true,  strokeColor, lineW, showOverlay, burnOutline);
+    bInt   = makeMaskedCopy(bBase, " (interior)",      false, strokeColor, lineW, showOverlay, burnOutline);
+    bExt   = makeMaskedCopy(bBase, " (exterior)",      true,  strokeColor, lineW, showOverlay, burnOutline);
+    selectWindow(bInt); rename(base + " [Blue] (interior)"); bInt = getTitle();
+    selectWindow(bExt); rename(base + " [Blue] (exterior)"); bExt = getTitle();
+
+    // 6) Close everything else
+    keep = newArray(rgbInt, rgbExt, bInt, bExt);
+    titles = getList("image.titles");
+    for (i=0; i<titles.length; i++){
+        t = titles[i];
+        if (!arrayContains(keep, t)) { selectWindow(t); close(); }
+    }
+
+    // 7) Build BIN masks (foreground=tissue=BLACK) with the ROI clipped
+    rgbIntBIN  = makeRGBMask_BLACK(rgbInt, false);
+    rgbExtBIN  = makeRGBMask_BLACK(rgbExt, true);
+    blueIntBIN = makeBlueMask_BLACK(bInt,  false, 100);
+    blueExtBIN = makeBlueMask_BLACK(bExt,  true,  100);
+
+    // 8) Results (fixed order; ALWAYS count BLACK) — count inside ROI on the MASK
+    if (isOpen("Results")) run("Clear Results");
+    setBatchMode(true);
+
+    views = newArray(rgbInt, rgbExt, bInt, bExt);
+    masks = newArray(rgbIntBIN, rgbExtBIN, blueIntBIN, blueExtBIN);
+
+    for (row=0; row<views.length; row++){
+        v = views[row];
+        m = masks[row];
+        if (!isOpen(v) || !isOpen(m)) continue;
+
+        // Total pixels in region (VIEW + ROI)
+        selectWindow(v);
+        roiManager("select", 0);
+        if (indexOf(v, "(exterior)") != -1) run("Make Inverse");
+        getRawStatistics(npx, mm, mi, ma, ss, hh);
+        regionPx = npx;
+        run("Select None");
+
+        // Target = BLACK pixels in MASK inside ROI
+        selectWindow(m);
+        roiManager("select", 0);
+        if (indexOf(m, "(exterior)") != -1) run("Make Inverse");
+        getRawStatistics(nn, m2, mi2, ma2, s2, h2);
+        target = 0;
+        if (h2.length >= 256) { target = h2[0]; }   // black bin count
+        run("Select None");
+
+        setResult("Image",                 row, base);
+        setResult("Window",                row, v);
+        setResult("MaskWindow",            row, m);
+        setResult("TotalPixelsInRegion",   row, regionPx);
+        setResult("TargetPixelsInRegion",  row, target);
+    }
+
+    updateResults();
+    setBatchMode(false);
+
+    // 9) Bring key outputs forward
+    bringIfOpen(rgbIntBIN); bringIfOpen(rgbExtBIN);
+    bringIfOpen(blueIntBIN); bringIfOpen(blueExtBIN);
+    bringIfOpen(rgbExt); bringIfOpen(rgbInt); bringIfOpen(bExt); bringIfOpen(bInt);
+
+    // 10) SAVE all outputs to a fixed folder
+    srcDir = "I:/Data/Bhavana/Green device/Trich/GoodAnalysisWithThresh/";
+
+    outs = newArray(rgbInt, rgbExt, bInt, bExt, rgbIntBIN, rgbExtBIN, blueIntBIN, blueExtBIN);
+    for (i=0; i<outs.length; i++) {
+        t = outs[i];
+        if (!isOpen(t)) continue;
+        selectWindow(t);
+        fname = t + ".tif";               // no sanitize()
+        saveAs("Tiff", srcDir + fname);
+    }
+}
+
+}

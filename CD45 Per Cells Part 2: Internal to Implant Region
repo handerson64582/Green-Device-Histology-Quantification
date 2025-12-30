@@ -1,0 +1,245 @@
+// File: ijm/merged_rgb_split_random4_overlap_polygon_then_original_pipeline.ijm
+// Start from merged RGB (Red=RED mask, Blue=DAPI) -> split to RED_Main + DAPI_Main (title-safe)
+// -> polygon implantation ROI (polygon/freehand/traced) -> propose 4 random 1500x1500 ROIs INSIDE polygon (overlap allowed)
+// -> then run your ORIGINAL Section 5-9 pipeline unchanged.
+
+macro "MergedRGB→Split→Polygon→Random 4x1500 (overlap OK)→Original Pipeline" {
+
+    // ---------- Helpers ----------
+    function ensure8bit(){ if (bitDepth()!=8) run("8-bit"); }
+
+    function addPolygonOverlay(impTitle, xp, yp, name, strokeColor){
+        selectWindow(impTitle); makeSelection("polygon", xp, yp);
+        Roi.setStrokeWidth(3); Roi.setStrokeColor(strokeColor); Roi.setName(name);
+        run("Add Selection...");
+    }
+
+    function addSquaresOverlay(impTitle, xs, ys, ws, hs, lbl, strokeColor){
+        selectWindow(impTitle); n=lengthOf(xs);
+        for (i=0;i<n;i++){
+            makeRectangle(xs[i],ys[i],ws[i],hs[i]);
+            Roi.setStrokeWidth(3); Roi.setStrokeColor(strokeColor); Roi.setName(lbl+(i+1));
+            run("Add Selection...");
+        }
+    }
+
+    function clearAndPrepOverlay(impTitle){
+        selectWindow(impTitle); run("Select None"); run("Remove Overlay");
+    }
+
+    function selectionFullyContainsRect(x,y,w,h,step){
+        if(!selectionContains(x,y)||!selectionContains(x+w,y)||!selectionContains(x,y+h)||!selectionContains(x+w,y+h)) return false;
+        for(yy=y; yy<=y+h; yy+=step){ if(!selectionContains(x,yy)||!selectionContains(x+w,yy)) return false; }
+        for(xx=x; xx<=x+w; xx+=step){ if(!selectionContains(xx,y)||!selectionContains(xx,y+h)) return false; }
+        for(yy=y+step; yy<y+h; yy+=step) for(xx=x+step; xx<x+w; xx+=step) if(!selectionContains(xx,yy)) return false;
+        return true;
+    }
+
+    function approveDialog(){
+        Dialog.create("Approve proposed ROIs");
+        Dialog.addMessage("Accept these 4 ROI squares?");
+        Dialog.addCheckbox("Accept", false);
+        Dialog.show();
+        return Dialog.getCheckbox();
+    }
+
+    function promptAndApplyThreshold(roiTitle){
+        selectWindow(roiTitle);
+        run("Threshold...");
+        waitForUser("Adjust threshold for '"+roiTitle+"' in the 'Threshold' window. Then press OK here.");
+        getThreshold(l,u);
+        if(l==-1||u==-1){
+            waitForUser("No threshold detected for '"+roiTitle+"'. Set it in the Threshold window, then press OK.");
+            getThreshold(l,u);
+            if(l==-1||u==-1) exit("Threshold still not set for '"+roiTitle+"'.");
+        }
+        setThreshold(l,u);
+        setOption("BlackBackground", false);
+        run("Convert to Mask");
+    }
+
+    function ensureWhiteOnBlack(){ getStatistics(area,mean,min,max,std); if(mean>128) run("Invert"); }
+
+    function binarizeRedVisible(roiTitle){
+        selectWindow(roiTitle);
+        setBatchMode(true);
+        if(bitDepth()!=8) run("8-bit");
+        setOption("BlackBackground", false);
+        setThreshold(7,255);
+        run("Convert to Mask");
+        setBatchMode(false);
+        ensureWhiteOnBlack();
+    }
+
+    function safeCloseIfOpen(n){ if (n!="" && isOpen(n)) { selectWindow(n); close(); } }
+
+    function arrayDiff(before, after) {
+        out = newArray(0);
+        for (i = 0; i < after.length; i++) if (!arrayContains(before, after[i])) out = arrayAppend(out, after[i]);
+        return out;
+    }
+    function arrayContains(arr, v) { for (i = 0; i < arr.length; i++) if (arr[i] == v) return true; return false; }
+    function arrayAppend(arr, v) { n = arr.length; out = newArray(n + 1); for (i = 0; i < n; i++) out[i] = arr[i]; out[n] = v; return out; }
+    function joinLines(arr){ s=""; for(i=0;i<arr.length;i++) s=s+arr[i]+"\n"; return s; }
+
+    // ---------- 1) Open merged RGB (KEEP EXACT INPUT STEP) ----------
+    open(File.openDialog("Select merged RGB (e.g., merged_large_RedREDmask_BlueDapi)"));
+    waitForUser("Activate the merged RGB window, then press OK.");
+    titles=getList("image.titles"); if (titles.length==0) exit("No merged RGB active");
+
+    mergedTitle=getTitle();
+    rename("Merged_RedMask_BlueDapi [RGB]");
+    mergedTitle=getTitle();
+    if (bitDepth()!=24) run("Stack to RGB");
+
+    // ---------- 2) Split to RED_Main + DAPI_Main (title-safe) ----------
+    titlesBefore = getList("image.titles");
+
+    selectWindow(mergedTitle);
+    run("Duplicate...", "title=[__MERGED_WORK__]");
+    selectWindow("__MERGED_WORK__");
+    if (bitDepth()!=24) run("Stack to RGB");
+    run("Split Channels");
+    safeCloseIfOpen("__MERGED_WORK__");
+
+    titlesAfter = getList("image.titles");
+    newTitles = arrayDiff(titlesBefore, titlesAfter);
+
+    redCh=""; grnCh=""; bluCh="";
+    for(i=0;i<newTitles.length;i++){
+        t=newTitles[i]; tl=toLowerCase(t);
+        if(indexOf(tl,"red")==0) redCh=t;
+        if(indexOf(tl,"green")==0) grnCh=t;
+        if(indexOf(tl,"blue")==0) bluCh=t;
+    }
+    if(redCh=="" || bluCh==""){
+        for(i=0;i<newTitles.length;i++){
+            t=newTitles[i]; tl=toLowerCase(t);
+            if(redCh=="" && indexOf(tl,"red")!=-1) redCh=t;
+            if(grnCh=="" && indexOf(tl,"green")!=-1) grnCh=t;
+            if(bluCh=="" && indexOf(tl,"blue")!=-1) bluCh=t;
+        }
+    }
+    if(redCh=="" || bluCh==""){
+        showMessage("Channel split failed",
+            "Could not map split channel windows.\n\nNew windows detected:\n"+joinLines(newTitles)+
+            "\nExpected titles like 'Red (3.1%)' and 'Blue (3.1%)'.");
+        exit("Could not detect Red/Blue channels.");
+    }
+
+    selectWindow(bluCh); rename("DAPI_Main"); ensure8bit();
+    selectWindow(redCh); rename("RED_Main");  ensure8bit();
+    if (grnCh!="" && isOpen(grnCh)) safeCloseIfOpen(grnCh);
+
+    // ---------- 3) Tissue polygon on DAPI (POLYGON/FREEHAND/TRACED) ----------
+    print("Section 3: Draw polygon on DAPI");
+    selectWindow("DAPI_Main");
+    do{
+        waitForUser("Draw the tissue/implantation region with Polygon/Freehand/Traced on *DAPI*, then press OK.");
+        t=selectionType();
+        if(t==-1) showMessage("No selection detected. Please draw polygon/freehand/traced.");
+        if(t!=-1 && (t!=2&&t!=3&&t!=4)) showMessage("Selection is not polygon/freehand/traced. Please redraw.");
+    } while(t==-1 || (t!=2&&t!=3&&t!=4));
+    getSelectionCoordinates(xp,yp);
+    getSelectionBounds(selX,selY,selW,selH);
+
+    // ---------- 4) Random 4×1500 ROIs (inside polygon) — overlap allowed, iterate until accepted ----------
+    print("Section 4: Proposing random 1500×1500 ROIs until accepted (overlap allowed)");
+    ROI_SIZE=1500; rectW=ROI_SIZE; rectH=ROI_SIZE; gridStep=100; maxAttempts=25000; approved=false;
+
+    while(!approved){
+        selectWindow("DAPI_Main"); makeSelection("polygon", xp, yp);
+
+        rx=newArray(); ry=newArray(); rw=newArray(); rh=newArray(); found=0; tries=0;
+
+        while(found<4 && tries<maxAttempts){
+            tries++;
+            x0=selX+floor(random()*maxOf(1, selW-rectW));
+            y0=selY+floor(random()*maxOf(1, selH-rectH));
+
+            // Overlap is OK: removed anyOverlap() constraint.
+            if(!selectionFullyContainsRect(x0,y0,rectW,rectH,gridStep)) continue;
+
+            rx=Array.concat(rx,x0); ry=Array.concat(ry,y0);
+            rw=Array.concat(rw,rectW); rh=Array.concat(rh,rectH);
+            found++;
+        }
+
+        if(found<4){
+            waitForUser("Could not place 4 squares (1500×1500) fully inside polygon.\nOK to try again, then optionally redraw polygon and press OK.");
+            selectWindow("DAPI_Main"); run("Select None");
+            waitForUser("If needed, redraw the polygon on DAPI, then press OK.");
+            t=selectionType();
+            if(t==2||t==3||t==4){ getSelectionCoordinates(xp,yp); getSelectionBounds(selX,selY,selW,selH); }
+            continue;
+        }
+
+        clearAndPrepOverlay("DAPI_Main");
+        addPolygonOverlay("DAPI_Main", xp, yp, "Tissue", "magenta");
+        addSquaresOverlay("DAPI_Main", rx, ry, rw, rh, "ROI ", "yellow");
+
+        approved=approveDialog();
+        if(!approved){ clearAndPrepOverlay("DAPI_Main"); print("Re-proposing ROIs..."); }
+    }
+
+    // ---------- 5) Mirror overlays to RED & flatten copies ----------
+    print("Section 5: Overlay to RED & flatten copies");
+    clearAndPrepOverlay("RED_Main");
+    addPolygonOverlay("RED_Main", xp, yp, "Tissue", "magenta");
+    addSquaresOverlay("RED_Main", rx, ry, rw, rh, "ROI ", "yellow");
+    selectWindow("DAPI_Main"); run("Flatten"); rename("DAPI_WithROIs");
+    selectWindow("RED_Main");  run("Flatten"); rename("RED_WithROIs");
+
+    // ---------- 6) Crop 4×(DAPI, RED) ----------
+    print("Section 6: Cropping 8 tiles (1500×1500)");
+    for(i=0;i<lengthOf(rx);i++){
+        selectWindow("DAPI_Main"); makeRectangle(rx[i],ry[i],rw[i],rh[i]); run("Duplicate...", "title=DAPI_ROI"+(i+1));
+        selectWindow("RED_Main");  makeRectangle(rx[i],ry[i],rw[i],rh[i]); run("Duplicate...", "title=RED_ROI"+(i+1));
+    }
+
+    // ---------- 7) Make RED ROIs visible binary (7–255) ----------
+    print("Section 7: Converting RED ROIs to binary (visible)");
+    for(i=1;i<=4;i++){ binarizeRedVisible("RED_ROI"+i); }
+
+    // ---------- 8) Analyze tiles ----------
+    print("Section 8: Analyze DAPI + RED");
+    dCounts=newArray(4); rCounts=newArray(4);
+    for(i=1;i<=4;i++){
+        // DAPI (manual + Fill Holes)
+        run("Clear Results");
+        promptAndApplyThreshold("DAPI_ROI"+i);
+        ensureWhiteOnBlack();
+        run("Fill Holes");
+        run("Set Measurements...", "area redirect=None decimal=3");
+        run("Analyze Particles...", "size=50-Infinity show=Nothing clear");
+        dCounts[i-1]=nResults;
+
+        // RED (already binary)
+        run("Clear Results");
+        selectWindow("RED_ROI"+i);
+        run("Set Measurements...", "area redirect=None decimal=3");
+        run("Analyze Particles...", "size=50-Infinity show=Nothing clear");
+        rCounts[i-1]=nResults;
+    }
+
+    // ---------- 9) Build final 8-row Results ----------
+    run("Clear Results");
+    row=0;
+    for(i=1;i<=4;i++){
+        setResult("Channel",row,"DAPI"); setResult("ROI",row,i); setResult("Count",row,dCounts[i-1]); row++;
+        setResult("Channel",row,"RED");  setResult("ROI",row,i); setResult("Count",row,rCounts[i-1]); row++;
+    }
+    updateResults();
+
+    print("DONE: RED ROIs are binary masks (7–255). DAPI uses manual per-ROI + Fill Holes. Overlays show polygon + 4 squares.");
+    selectWindow("DAPI_WithROIs"); selectWindow("RED_WithROIs");
+
+    // --- END STEP: Threshold RED_WithROIs → mask, then color-merge with DAPI_WithROIs ---
+    selectWindow("RED_WithROIs"); run("Duplicate...", "title=RED_WithROIs_Mask");
+    ensure8bit(); setOption("BlackBackground", false); setThreshold(7,255); run("Convert to Mask"); ensureWhiteOnBlack();
+    selectWindow("DAPI_WithROIs"); ensure8bit();
+    run("Merge Channels...", "c1=[RED_WithROIs_Mask] c3=[DAPI_WithROIs] create");
+    rename("Merged_withInterior_Large_RedREDmask_BlueDAPI");
+    selectWindow("Merged_withInterior_Large_RedREDmask_BlueDAPI"); run("RGB Color");
+    waitForUser("Save Reminder", "Please save the merged RGB image now and copy results to excel file");
+}
